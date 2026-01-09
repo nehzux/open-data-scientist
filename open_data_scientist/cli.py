@@ -104,8 +104,7 @@ def show_configuration(args) -> None:
     table.add_row(
         "Data Directory", args.data_dir or "Current directory (with confirmation)"
     )
-    table.add_row("Trace File", args.trace_path or "Disabled")
-    table.add_row("Log File", args.log_path or "Disabled")
+    table.add_row("Trace Log", args.trace_path or "Disabled")
 
     console.print(table)
     console.print()
@@ -194,21 +193,16 @@ Execution Modes:
     data_dir = get_data_directory(args.data_dir)
 
     trace_path = None
+    trace_base = None
     if args.save_trace:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        trace_path = str(Path.cwd() / f"react_trace_{timestamp}.jsonl")
-
-    log_path = None
-    if args.save_trace:
-        # Use same timestamp as trace_path to keep files paired
-        timestamp = Path(trace_path).stem.split("_", 2)[-1] if trace_path else datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = str(Path.cwd() / f"log-{timestamp}.md")
+        trace_base = str(Path.cwd() / f"log-trace_{timestamp}")
+        trace_path = f"{trace_base}.jsonl"
 
     # Show configuration
     # Update args for display
     args.data_dir = (Path(data_dir).name if data_dir else "None (no files will be uploaded)")
-    args.trace_path = trace_path
-    args.log_path = log_path
+    args.trace_path = trace_base
     show_configuration(args)
 
     # Ask for confirmation
@@ -222,10 +216,8 @@ Execution Modes:
         welcome_text += f"\n📁 Data from: {Path(data_dir).name}"
     welcome_text += f"\n🧠 Model: {args.model}"
     welcome_text += f"\n⚡ Executor: {args.executor.upper()}"
-    if trace_path:
-        welcome_text += f"\nTrace: {Path(trace_path).name}"
-    if log_path:
-        welcome_text += f"\nLog: {Path(log_path).name}"
+    if trace_base:
+        welcome_text += f"\nTrace Log: {Path(trace_base).name}"
 
     welcome_panel = Panel(
         welcome_text,
@@ -255,7 +247,6 @@ Execution Modes:
             executor=args.executor,
             data_dir=data_dir,
             trace_path=trace_path,
-            log_path=log_path,
         )
 
     except Exception as e:
