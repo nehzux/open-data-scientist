@@ -116,6 +116,7 @@ CLI Options
 | `--data-dir` | `-d` | Data directory to upload | Current directory (with confirmation) |
 | `--session-id` | `-s` | Reuse existing session ID | Auto-generated |
 | `--help` | `-h` | Show help message | - |
+| `--save-trace` | - | Save query/execution trace as JSONL and a Markdown log (`log-*.md`) in the current directory | Disabled |
 
 
 2. Python API: For programmatic usage, you can also use the Python API directly

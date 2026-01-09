@@ -1,5 +1,8 @@
+import json
 import re
 import sys
+from datetime import datetime
+from pathlib import Path
 from typing import Callable, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from together import Client
@@ -40,12 +43,17 @@ class ReActDataScienceAgent:
         max_iterations: int = max_iterations,
         executor: str = "internal",
         data_dir: Optional[str] = None,
+        trace_path: Optional[str] = None,
+        log_path: Optional[str] = None,
     ):
         self.client = Client()
         self.session_id = session_id
         self.model = model
         self.max_iterations = max_iterations
         self.data_dir = data_dir
+        self.executor_type = executor
+        self.trace_path = trace_path
+        self.log_path = log_path
 
         self.system_prompt = PROMPT_TEMPLATE
 
@@ -67,6 +75,41 @@ class ReActDataScienceAgent:
                 delete_session_internal(self.session_id)
             except Exception:
                 pass
+
+    def _write_trace(self, event: dict) -> None:
+        if not self.trace_path:
+            return
+        event.setdefault(
+            "timestamp",
+            datetime.now().isoformat(timespec="seconds"),
+        )
+        with open(self.trace_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=True) + "\n")
+
+    def _append_log(self, text: str) -> None:
+        if not self.log_path:
+            return
+        Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(self.log_path, "a", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def _extract_image_filenames(self, observation: str) -> list[str]:
+        """
+        Extract saved image filenames from observation text.
+        Observation strings include 'saved as: filename.png' when plots are saved.
+        """
+        return re.findall(r"saved as: ([\w._-]+\.png)", observation)
+
+    def _init_log(self) -> None:
+        """Create log file with header if it doesn't exist."""
+        if not self.log_path:
+            return
+        log_file = Path(self.log_path)
+        if log_file.exists() and log_file.stat().st_size > 0:
+            return
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_file, "w", encoding="utf-8") as handle:
+            handle.write("# ReAct Run Log\n\n")
 
     def final_anwer_execution(self, final_answer: str, session_id: str | None):
         """Execute all Python code blocks in the final answer and replace them with their results"""
@@ -135,6 +178,34 @@ class ReActDataScienceAgent:
         self.history.append({"role": "user", "content": user_input})
 
         current_iteration = 0
+        result = None
+        started_at = datetime.now().isoformat(timespec="seconds")
+        self._init_log()
+
+        self._write_trace(
+            {
+                "type": "query",
+                "query": user_input,
+                "model": self.model,
+                "executor": self.executor_type,
+                "session_id": self.session_id,
+            }
+        )
+
+        self._append_log(
+            "\n".join(
+                [
+                    "\n## Query",
+                    f"- Task: {user_input}",
+                    f"- Model: {self.model}",
+                    f"- Executor: {self.executor_type}",
+                    f"- Session: {self.session_id or 'None'}",
+                    f"- Data directory: {self.data_dir or 'None'}",
+                    f"- Started: {started_at}",
+                    "",
+                ]
+            )
+        )
 
         # Rich startup display
         startup_text = f"🚀 Starting ReAct Data Science Agent\n📝 Task: {user_input}"
@@ -157,6 +228,25 @@ class ReActDataScienceAgent:
                     
                     # Add final answer to history
                     self.history.append({"role": "assistant", "content": f"<answer>\n{result}\n</answer>"})
+
+                    self._write_trace(
+                        {
+                            "type": "final_answer",
+                            "answer": result,
+                            "session_id": self.session_id,
+                        }
+                    )
+
+                    self._append_log(
+                        "\n".join(
+                            [
+                                "\n**Final Answer**",
+                                "",
+                                result,
+                                "",
+                            ]
+                        )
+                    )
                     
                     final_panel = Panel(
                         result,
@@ -221,16 +311,91 @@ class ReActDataScienceAgent:
                     {"role": "user", "content": f"Observation: {execution_summary}"}
                 )
 
+                images = self._extract_image_filenames(execution_summary)
+                images_section = ""
+                if images:
+                    images_section_lines = ["\nImages:"]
+                    for fname in images:
+                        images_section_lines.append(f"![{fname}]({fname})")
+                    images_section_lines.append("")  # trailing newline
+                    images_section = "\n".join(images_section_lines)
+
+                self._append_log(
+                    "\n".join(
+                        [
+                            f"### Step {current_iteration + 1}",
+                            "",
+                            "**Thought**",
+                            thought,
+                            "",
+                            "**Code**",
+                            f"```python\n{action_input}\n```",
+                            "",
+                            "**Observation**",
+                            execution_summary,
+                            images_section,
+                            "",
+                        ]
+                    )
+                )
+
+                self._write_trace(
+                    {
+                        "type": "step",
+                        "iteration": current_iteration + 1,
+                        "thought": thought,
+                        "code": action_input,
+                        "observation": execution_summary,
+                        "session_id": self.session_id,
+                    }
+                )
+
                 current_iteration += 1
                 console.print(Rule(style="dim"))
 
             except SessionSwapError as e:
+                self._write_trace(
+                    {
+                        "type": "error",
+                        "iteration": current_iteration + 1,
+                        "error": str(e),
+                        "session_id": self.session_id,
+                    }
+                )
+                self._append_log(
+                    "\n".join(
+                        [
+                            f"### Error at step {current_iteration + 1}",
+                            "",
+                            str(e),
+                            "",
+                        ]
+                    )
+                )
                 console.print(
                     f"💀 [bold red]FATAL ERROR: Session ID changed unexpectedly! This is often due to long running tasks.[/bold red] {str(e)}"
                 )
                 console.print("[bold red]Killing the program to prevent data corruption.[/bold red]")
                 sys.exit(1)
             except Exception as e:
+                self._write_trace(
+                    {
+                        "type": "error",
+                        "iteration": current_iteration + 1,
+                        "error": str(e),
+                        "session_id": self.session_id,
+                    }
+                )
+                self._append_log(
+                    "\n".join(
+                        [
+                            f"### Error at step {current_iteration + 1}",
+                            "",
+                            str(e),
+                            "",
+                        ]
+                    )
+                )
                 console.print(
                     f"❌ [bold red]Error in iteration {current_iteration + 1}:[/bold red] {str(e)}"
                 )
@@ -248,7 +413,36 @@ class ReActDataScienceAgent:
                 f"⚠️ [bold yellow]Maximum iterations ({self.max_iterations}) reached without completion[/bold yellow]"
             )
             result = result or "Task incomplete - maximum iterations reached"
-        
+            self._write_trace(
+                {
+                    "type": "max_iterations",
+                    "max_iterations": self.max_iterations,
+                    "result": result,
+                    "session_id": self.session_id,
+                }
+            )
+            self._append_log(
+                "\n".join(
+                    [
+                        f"⚠️ Maximum iterations reached ({self.max_iterations})",
+                        "",
+                        result,
+                        "",
+                    ]
+                )
+            )
+        finished_at = datetime.now().isoformat(timespec="seconds")
+        self._append_log(
+            "\n".join(
+                [
+                    f"Finished: {finished_at}",
+                    "",
+                    "---",
+                    "",
+                ]
+            )
+        )
+
         return result
 
 
